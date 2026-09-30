@@ -1,0 +1,13 @@
+.env
+*.pem
+*.key
+credentials*
+data/raw/*
+!data/raw/.gitkeep
+data/db/*.duckdb
+data/db/*.wal
+__pycache__/
+*.pyc
+.venv/
+venv/
+.ipynb_checkpoints/
