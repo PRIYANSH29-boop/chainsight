@@ -60,8 +60,15 @@ MONTHS = {"Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4, "May": 5, "Jun": 6,
           "Jul": 7, "Aug": 8, "Sep": 9, "Oct": 10, "Nov": 11, "Dec": 12}
 
 
+DEFREF_MARK = "@@DEFREF "
+
+
 def _strip_html(html_text):
     t = re.sub(r"<script.*?</script>", " ", html_text, flags=re.S | re.I)
+    # live R-files carry the axis/member in the header anchor's defref_ attr;
+    # surface it as a marker line immediately before the anchor's text
+    t = re.sub(r"<a[^>]*defref_([^'\"]+)['\"][^>]*>",
+               lambda m: "\n" + DEFREF_MARK + m.group(1) + "@@\n", t)
     t = re.sub(r"<[^>]+>", "\n", t)
     t = t.replace("&#160;", " ").replace("&amp;", "&").replace("&#8211;", "-")
     return [ln.strip() for ln in t.split("\n") if ln.strip()]
@@ -112,8 +119,22 @@ def _annual_period_ends(lines):
     return ["%04d-%02d-%02d" % d for d in annual]
 
 
-def _section_from_context(context, regime):
-    """Classify a section from the member lines collected before [Line Items]."""
+def _section_from_context(context, regime, defref=None):
+    """Classify a section from the member lines collected before [Line Items].
+    When the header anchor carried a defref_, prefer it: a
+    StatementBusinessSegmentsAxis defref yields the member directly; a
+    ConsolidationItemsAxis defref confirms the role."""
+    member_override = role_hint = None
+    if defref:
+        if "StatementBusinessSegmentsAxis=" in defref:
+            member_override = defref.split("StatementBusinessSegmentsAxis=")[-1]
+            role_hint = "operating"
+        elif defref.endswith("OperatingSegmentsMember"):
+            role_hint = "operating"
+        elif defref.endswith("CorporateNonSegmentMember"):
+            role_hint = "corporate"
+        elif defref.endswith("MaterialReconcilingItemsMember"):
+            role_hint = "reconciling"
     ctx = [c for c in context if c]  # keep order
     if ctx == ["Corporate"]:
         return dict(role="corporate", display="Corporate",
@@ -128,7 +149,13 @@ def _section_from_context(context, regime):
     if len(displays) == 1 and not extras:
         d = displays[0]
         return dict(role="operating", display=d,
-                    member=DISPLAY_TO_MEMBER[regime].get(d, "UNMAPPED_" + d),
+                    member=member_override
+                    or DISPLAY_TO_MEMBER[regime].get(d, "UNMAPPED_" + d),
+                    dimension=SEGMENT_AXIS, excluded=False)
+    if member_override and len(ctx) == 1 and role_hint == "operating":
+        # display name unknown to the canon map, but the filing's own defref
+        # names the member authoritatively
+        return dict(role="operating", display=ctx[0], member=member_override,
                     dimension=SEGMENT_AXIS, excluded=False)
     # one-off member (e.g. Apple Credit Card Portfolio) or unknown -> excluded
     return dict(role="excluded", display=" / ".join(ctx) or "(unknown)",
@@ -145,22 +172,44 @@ def parse_r_file(html_text, accession, filed_date, source_reference,
         raise ValueError("no Dec-31 annual period ends found in header")
 
     # regime from the display names present anywhere in the file
-    regime = "4SEG" if any(ln in FOUR_ONLY for ln in lines) else "3SEG"
+    # (names may appear standalone or inside pipe-joined header cells)
+    def _parts(ln):
+        return [p.strip() for p in ln.split(" | ")] if " | " in ln else [ln]
+    regime = ("4SEG" if any(p in FOUR_ONLY for ln in lines for p in _parts(ln))
+              else "3SEG")
 
     rows, warnings = [], []
     context = None            # collecting member lines after a trigger
+    ctx_defref = None         # defref captured at the section header
     current = None            # active section dict
     first_lineitems_seen = False
+    pending_defref = None
 
     i = 0
     while i < len(lines):
         ln = lines[i]
+        if ln.startswith(DEFREF_MARK) and ln.endswith("@@"):
+            pending_defref = ln[len(DEFREF_MARK):-2]
+            i += 1
+            continue
+        this_defref, pending_defref = pending_defref, None
+        if " | " in ln:
+            # live R-file form: one header cell, pipe-joined, e.g.
+            # "Operating Segments | Consumer & Community Banking"
+            parts = [p.strip() for p in ln.split(" | ")]
+            if parts[0] == "Operating Segments":
+                context, ctx_defref = parts[1:], this_defref
+            else:  # e.g. "VISA | Class C Common Shares" -> excluded section
+                context, ctx_defref = parts, this_defref
+            i += 1
+            continue
         if ln == "Operating Segments":
-            context = []
+            context, ctx_defref = [], this_defref
         elif ln == LINE_ITEMS:
             if context is not None:
-                current = _section_from_context(context, regime)
+                current = _section_from_context(context, regime, ctx_defref)
                 context = None
+                ctx_defref = None
             elif not first_lineitems_seen:
                 current = dict(role="consolidated", display="Consolidated",
                                member=None, dimension=None, excluded=False)
@@ -171,7 +220,7 @@ def parse_r_file(html_text, accession, filed_date, source_reference,
         elif context is not None:
             context.append(ln)
         elif ln in ("Corporate", "Reconciling Items"):
-            context = [ln]
+            context, ctx_defref = [ln], this_defref
         elif current and not current["excluded"] and ln in METRIC_MAP:
             metric, basis = METRIC_MAP[ln]
             vals, pct_row, j = [], False, i + 1

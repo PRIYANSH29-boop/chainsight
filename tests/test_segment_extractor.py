@@ -139,5 +139,53 @@ class TestCrossRegime(unittest.TestCase):
         self.assertEqual(parts, 158104)
 
 
+class TestLiveHeaderForm(unittest.TestCase):
+    """Regression tests for the live SEC R-file header structure discovered
+    in the 3 Oct 2026 live validation (pipe-joined single-cell headers with
+    defref_ anchors)."""
+
+    def test_pipe_joined_operating_header_parses(self):
+        html = ("<table><tr><td>12 Months Ended</td></tr>"
+                "<tr><td>Dec. 31, 2025</td></tr>"
+                "<tr><td>Operating Segments | Asset & Wealth Management</td></tr>"
+                "<tr><td>Segment Reporting Information [Line Items]</td></tr>"
+                "<tr><td>Net income</td><td>6,522</td></tr></table>")
+        rows, _ = se.parse_r_file(html, "a", "2026-02-13", "inline")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["segment"], "Asset & Wealth Management")
+        self.assertEqual(rows[0]["member"], "jpm_AssetandWealthManagementSegmentMember")
+        self.assertEqual(rows[0]["consolidation_role"], "operating")
+
+    def test_pipe_joined_one_off_member_excluded(self):
+        html = ("<table><tr><td>12 Months Ended</td></tr>"
+                "<tr><td>Dec. 31, 2025</td></tr>"
+                "<tr><td>Operating Segments | Consumer & Community Banking | "
+                "Apple Credit Card Portfolio</td></tr>"
+                "<tr><td>Segment Reporting Information [Line Items]</td></tr>"
+                "<tr><td>Net income</td><td>2,200</td></tr></table>")
+        rows, _ = se.parse_r_file(html, "a", "2026-02-13", "inline")
+        self.assertEqual(rows, [])
+
+    def test_defref_business_segment_axis_overrides_member(self):
+        # display name NOT in the canon map, member supplied by the defref
+        html = ("<table><tr><td>12 Months Ended</td></tr>"
+                "<tr><td>Dec. 31, 2025</td></tr>"
+                "<tr><td><a onclick=\"Show.showAR( this, 'defref_us-gaap_"
+                "StatementBusinessSegmentsAxis=jpm_FutureSegmentMember', window );\">"
+                "Operating Segments | Future Segment</a></td></tr>"
+                "<tr><td>Segment Reporting Information [Line Items]</td></tr>"
+                "<tr><td>Net income</td><td>1,000</td></tr></table>")
+        rows, _ = se.parse_r_file(html, "a", "2026-02-13", "inline")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["member"], "jpm_FutureSegmentMember")
+        self.assertEqual(rows[0]["consolidation_role"], "operating")
+
+    def test_fy2025_fixture_defref_anchors_do_not_break_canonical_members(self):
+        rows, _ = se.parse_r_file(load("fy2025_segments_min.htm"), ACC25, FILED25, "f")
+        cib = [r for r in rows if r["segment"] == "Commercial & Investment Bank"]
+        self.assertTrue(cib)
+        self.assertEqual(cib[0]["member"], "jpm_CommercialAndInvestmentBankMember")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
