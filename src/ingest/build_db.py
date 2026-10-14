@@ -96,6 +96,11 @@ for series_dir in sorted((RAW / "fred").iterdir()):
             ))
         except (KeyError, TypeError, ValueError):
             bad += 1
+# dedupe: one row per (series, date); later dirs override earlier (full pulls win)
+dedup = {}
+for row in good:
+    dedup[(row[0], row[1])] = row
+good = list(dedup.values())
 con.execute("DROP TABLE IF EXISTS macro_series")
 con.execute("""CREATE TABLE macro_series(
     series_id VARCHAR, obs_date DATE, value DOUBLE,
